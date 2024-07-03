@@ -1,15 +1,17 @@
 from datetime import datetime
 from uuid import uuid4
 from fastapi import APIRouter, Body, HTTPException, status
+from fastapi_pagination import LimitOffsetPage, paginate
 from pydantic import UUID4
 
-from workout_api.atleta.schemas import AtletaIn, AtletaOut, AtletaUpdate
+from workout_api.atleta.schemas import AtletaBasicOut, AtletaIn, AtletaOut, AtletaUpdate
 from workout_api.atleta.models import AtletaModel
 from workout_api.categorias.models import CategoriaModel
 from workout_api.centro_treinamento.models import CentroTreinamentoModel
 
 from workout_api.contrib.dependencies import DatabaseDependency
 from sqlalchemy.future import select
+from sqlalchemy.exc import IntegrityError
 
 router = APIRouter()
 
@@ -46,7 +48,7 @@ async def post(
             detail=f'O centro de treinamento {centro_treinamento_nome} não foi encontrado.'
         )
     try:
-        atleta_out = AtletaOut(id=uuid4(), created_at=datetime.utcnow(), **atleta_in.model_dump())
+        atleta_out = AtletaOut(id=uuid4(), created_at=datetime.now(), **atleta_in.model_dump())
         atleta_model = AtletaModel(**atleta_out.model_dump(exclude={'categoria', 'centro_treinamento'}))
 
         atleta_model.categoria_id = categoria.pk_id
@@ -54,10 +56,13 @@ async def post(
         
         db_session.add(atleta_model)
         await db_session.commit()
-    except Exception:
+    except IntegrityError:
+        db_session.rollback()
+        cpf = atleta_out.cpf
+        
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, 
-            detail='Ocorreu um erro ao inserir os dados no banco'
+            status_code=status.HTTP_409_CONFLICT, 
+            detail=f'Já existe um atleta cadastrado com o cpf: {cpf}'
         )
 
     return atleta_out
@@ -67,12 +72,12 @@ async def post(
     '/', 
     summary='Consultar todos os Atletas',
     status_code=status.HTTP_200_OK,
-    response_model=list[AtletaOut],
+    response_model=LimitOffsetPage[AtletaBasicOut],
 )
-async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
+async def query(db_session: DatabaseDependency) -> LimitOffsetPage[AtletaBasicOut]:
     atletas: list[AtletaOut] = (await db_session.execute(select(AtletaModel))).scalars().all()
     
-    return [AtletaOut.model_validate(atleta) for atleta in atletas]
+    return paginate([AtletaOut.model_validate(atleta) for atleta in atletas])
 
 
 @router.get(
@@ -81,7 +86,7 @@ async def query(db_session: DatabaseDependency) -> list[AtletaOut]:
     status_code=status.HTTP_200_OK,
     response_model=AtletaOut,
 )
-async def get(id: UUID4, db_session: DatabaseDependency) -> AtletaOut:
+async def query_id(id: UUID4, db_session: DatabaseDependency) -> AtletaOut:
     atleta: AtletaOut = (
         await db_session.execute(select(AtletaModel).filter_by(id=id))
     ).scalars().first()
@@ -90,6 +95,41 @@ async def get(id: UUID4, db_session: DatabaseDependency) -> AtletaOut:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, 
             detail=f'Atleta não encontrado no id: {id}'
+        )
+    
+    return atleta
+
+
+@router.get(
+    '/', 
+    summary='Consultar todos os Atletas pelo nome consultado',
+    status_code=status.HTTP_200_OK,
+    response_model=LimitOffsetPage[AtletaOut],
+)
+async def query_name(nome: str, db_session: DatabaseDependency) -> LimitOffsetPage[AtletaOut]:
+    query = select(AtletaModel).filter(AtletaModel.nome == nome)
+    atletas: list[AtletaOut] = (await db_session.execute(query)).scalars().all()
+    
+    return paginate([AtletaOut.model_validate(atleta) for atleta in atletas])
+
+
+@router.get(
+    '/{id}', 
+    summary='Consulta um Atleta pelo cpf',
+    status_code=status.HTTP_200_OK,
+    response_model=AtletaOut,
+)
+async def query_cpf(cpf: str, db_session: DatabaseDependency) -> AtletaOut:
+    query = select(AtletaModel).filter(AtletaModel.cpf == cpf)
+    
+    atleta: AtletaOut = (
+        await db_session.execute(query)
+    ).scalars().first()
+
+    if not atleta:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail=f'Atleta não encontrado no cpf: {cpf}'
         )
     
     return atleta
